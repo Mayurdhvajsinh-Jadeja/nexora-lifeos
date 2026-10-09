@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from agents.planner import create_plan, Plan
+from orchestrator.engine import validate_plan, execute_plan
 import ollama
 
 app = FastAPI(title="NEXORA LifeOS")
@@ -26,3 +27,8 @@ class PlanRequest(BaseModel):
 @app.post("/plan", response_model=Plan)
 def plan(req: PlanRequest):
     return create_plan(req.goal)
+
+@app.post("/run")
+def run(req: PlanRequest):
+    plan = validate_plan(create_plan(req.goal))
+    return {"plan": plan, "results": execute_plan(plan)}
