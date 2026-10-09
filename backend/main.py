@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from agents.planner import create_plan, Plan
 import ollama
 
 app = FastAPI(title="NEXORA LifeOS")
@@ -18,3 +19,10 @@ def chat(req: ChatRequest):
         messages=[{"role": "user", "content": req.message}],
     )
     return {"reply": res["message"]["content"]}
+
+class PlanRequest(BaseModel):
+    goal: str
+
+@app.post("/plan", response_model=Plan)
+def plan(req: PlanRequest):
+    return create_plan(req.goal)
