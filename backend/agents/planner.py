@@ -4,26 +4,35 @@ from pydantic import BaseModel
 
 MODEL = "qwen2.5:3b"
 
+
 class Task(BaseModel):
     id: int
     title: str
     agent: Literal["researcher", "study", "file_manager", "reviewer"]
     depends_on: list[int]
 
+
 class PlanDraft(BaseModel):
     tasks: list[Task]
+
 
 class Plan(BaseModel):
     goal: str
     tasks: list[Task]
 
+
 SYSTEM_PROMPT = """You are the Planner agent of NEXORA LifeOS.
-Break the user's goal into 3 to 6 small, concrete tasks.
+Break the user's goal into 3 to 5 small, concrete tasks that a text-only AI can complete by writing text.
+Every task must directly serve the goal. Do not plan videos, meetings, group activities or anything that needs people or tools.
+Each task must produce something NEW and different from the others. Never create two tasks that restate the same thing.
+Every task title must name its deliverable, for example "Write a 5-question quiz with answers on normalization" or "Make a day-by-day 14-day study schedule".
+If the goal is about studying or working from the user's own material, start with a file_manager task that finds the relevant notes.
 Each task needs: id (starting at 1), title, agent, depends_on (list of earlier task ids).
-Agents: researcher (finds information), study (explains and makes study material),
-file_manager (searches the user's documents), reviewer (checks the final result).
-The last task must always be done by the reviewer and depend on the other tasks.
+Agents: researcher (explains information), study (makes study material: notes, quizzes, flashcards, schedules),
+file_manager (searches the user's documents).
+Do not create a reviewer task; it is added automatically.
 Only depend on tasks with a smaller id."""
+
 
 def create_plan(goal: str) -> Plan:
     res = ollama.chat(
