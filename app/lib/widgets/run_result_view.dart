@@ -102,7 +102,7 @@ class RunResultView extends StatelessWidget {
             dense: true,
             contentPadding: EdgeInsets.zero,
             title: Text(
-                'Review ${i + 1}: ${reviews[i]['verdict']}  (${reviews[i]['seconds']}s)'),
+                '${reviews[i]['kind'] == 'rules' ? 'Rule check' : 'AI review'}: ${reviews[i]['verdict']}  (${reviews[i]['seconds']}s)'),
             subtitle: (reviews[i]['issues'] as List).isEmpty
                 ? const Text('No issues')
                 : Text((reviews[i]['issues'] as List)
