@@ -1,10 +1,13 @@
-from fastapi import FastAPI
+import time
+
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import ollama
 
 from agents.planner import create_plan, Plan
 from orchestrator.engine import validate_plan, execute_plan
 from rag.store import ingest_folder, search
+from db.runlog import save_run, list_runs, get_run, agent_stats
 
 app = FastAPI(title="NEXORA LifeOS")
 
@@ -53,5 +56,26 @@ def plan(req: PlanRequest):
 
 @app.post("/run")
 def run(req: PlanRequest):
+    start = time.time()
     plan = validate_plan(create_plan(req.goal))
-    return {"plan": plan, **execute_plan(plan)}
+    result = execute_plan(plan)
+    run_id = save_run(plan, result, time.time() - start)
+    return {"run_id": run_id, "plan": plan, **result}
+
+
+@app.get("/runs")
+def runs(limit: int = 20):
+    return {"runs": list_runs(limit)}
+
+
+@app.get("/runs/{run_id}")
+def run_detail(run_id: int):
+    data = get_run(run_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return data
+
+
+@app.get("/stats")
+def stats():
+    return {"agents": agent_stats()}

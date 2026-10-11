@@ -13,7 +13,7 @@ GROUNDING = (
 
 AGENT_PROMPTS = {
     "researcher": "You are the Researcher agent. Give specific, useful information for your task in 150-250 words." + GROUNDING,
-    "study": "You are the Study agent. Produce exactly the deliverable your task asks for, in 150-400 words. A quiz means the number of questions asked for, each WITH an answer. Flashcards means at least 8 term/definition cards. A schedule means day by day. Respect any time limit in the overall goal exactly (a 2-week plan has exactly 14 days, no more). Never repeat the same line twice; every day or item must be different. Be specific, not just a list of topic names. Finish your last sentence." + GROUNDING,
+    "study": "You are the Study agent. Produce exactly the deliverable your task asks for, in 150-400 words. Produce only that deliverable, nothing extra. A quiz means the number of questions asked for, each WITH an answer. Flashcards means at least 8 term/definition cards. A schedule means day by day. Respect any time limit in the overall goal exactly (a 2-week plan has exactly 14 days, no more). Never repeat the same line twice; every day or item must be different. Be specific, not just a list of topic names. Finish your last sentence." + GROUNDING,
     "file_manager": "You are the File Manager agent. Look at the SOURCE NOTES and list which documents are relevant and the key points each one contains, in 100-200 words. If there are no notes, say so." + GROUNDING,
 }
 
@@ -24,6 +24,8 @@ Check each step:
 3. Does the result respect limits in the goal (for example a 2-week plan must not run for 28 days)?
 The reference notes may not cover everything. A topic missing from the notes is NOT a problem. Only report real errors you are sure about, and report each distinct problem once, on the task it belongs to.
 Return verdict PASS if there are no real problems. Otherwise return FAIL and list each problem with its task_id and a one-sentence description."""
+
+CUT_OFF_PROBLEM = "Your previous answer was cut off before it finished. Write a shorter but complete version."
 
 
 class Issue(BaseModel):
@@ -139,21 +141,29 @@ def execute_plan(plan: Plan) -> dict:
     for task in workers:
         run_and_log(task, 1)
 
+    cut_off = [Issue(task_id=e["task_id"], problem=CUT_OFF_PROBLEM)
+               for e in log if e["truncated"]]
+
     start = time.time()
     first = review(plan, results, chunks)
     reviews.append({**first.model_dump(), "seconds": round(time.time() - start, 2)})
 
+    reviewer_issues, seen_problems = [], set()
     if first.verdict == "FAIL":
-        retried, seen_problems = set(), set()
         for issue in first.issues:
             key = issue.problem.strip().lower()
-            if key in seen_problems:
-                continue
-            seen_problems.add(key)
-            task = by_id.get(issue.task_id)
-            if task and task.agent != "reviewer" and task.id not in retried:
-                retried.add(task.id)
-                run_and_log(task, 2, issue.problem)
+            if key not in seen_problems:
+                seen_problems.add(key)
+                reviewer_issues.append(issue)
+
+    retried = set()
+    for issue in reviewer_issues + cut_off:
+        task = by_id.get(issue.task_id)
+        if task and task.agent != "reviewer" and task.id not in retried:
+            retried.add(task.id)
+            run_and_log(task, 2, issue.problem)
+
+    if retried:
         start = time.time()
         second = review(plan, results, chunks)
         reviews.append({**second.model_dump(), "seconds": round(time.time() - start, 2)})
