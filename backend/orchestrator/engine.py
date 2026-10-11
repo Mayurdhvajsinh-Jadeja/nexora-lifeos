@@ -6,14 +6,14 @@ from agents.planner import Plan, Task, MODEL
 from rag.store import search
 
 GROUNDING = (
-    " If SOURCE NOTES are provided, take every fact from them and write 'not in your notes' "
-    "for anything they do not cover. Never invent statistics, studies, journals or quotes."
-    " Output only the content. Do not mention task numbers."
+    " If SOURCE NOTES are provided, take every fact from them. If the notes do not cover something the task needs, skip it instead of guessing."
+    " Never invent statistics, studies, journals or quotes."
+    " Never mention 'source notes' or task numbers in your answer; just write the content."
 )
 
 AGENT_PROMPTS = {
     "researcher": "You are the Researcher agent. Give specific, useful information for your task in 150-250 words." + GROUNDING,
-    "study": "You are the Study agent. Produce exactly the deliverable your task asks for, in 150-350 words. A quiz means the number of questions asked for, each WITH an answer. Flashcards means at least 8 term/definition cards. A schedule means day by day. Be specific, not just a list of topic names. Finish your last sentence." + GROUNDING,
+    "study": "You are the Study agent. Produce exactly the deliverable your task asks for, in 150-400 words. A quiz means the number of questions asked for, each WITH an answer. Flashcards means at least 8 term/definition cards. A schedule means day by day. Respect any time limit in the overall goal exactly (a 2-week plan has exactly 14 days, no more). Never repeat the same line twice; every day or item must be different. Be specific, not just a list of topic names. Finish your last sentence." + GROUNDING,
     "file_manager": "You are the File Manager agent. Look at the SOURCE NOTES and list which documents are relevant and the key points each one contains, in 100-200 words. If there are no notes, say so." + GROUNDING,
 }
 
@@ -21,7 +21,9 @@ REVIEWER_PROMPT = """You are the Reviewer agent. You get the goal, reference not
 Check each step:
 1. Does the result deliver what the step title asks? Count items before saying something is missing. Do not demand more than the title asks.
 2. Does any claim contradict the reference notes, or is a specific fact, number or source invented?
-Return verdict PASS only if every step is fine. Otherwise return FAIL and list each real problem with the task_id it belongs to and a one-sentence description. Only report problems you are sure about."""
+3. Does the result respect limits in the goal (for example a 2-week plan must not run for 28 days)?
+The reference notes may not cover everything. A topic missing from the notes is NOT a problem. Only report real errors you are sure about, and report each distinct problem once, on the task it belongs to.
+Return verdict PASS if there are no real problems. Otherwise return FAIL and list each problem with its task_id and a one-sentence description."""
 
 
 class Issue(BaseModel):
@@ -56,7 +58,8 @@ def call_model(system, user, limit, schema=None):
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
         format=schema,
-        options={"temperature": 0.3, "num_predict": limit},
+        options={"temperature": 0.3, "num_predict": limit,
+                 "num_ctx": 8192, "repeat_penalty": 1.1},
     )
     truncated = getattr(res, "done_reason", None) == "length"
     return res["message"]["content"], truncated
@@ -85,13 +88,14 @@ def run_worker(task, plan, results, feedback=None):
     if feedback:
         user += f"\n\nA reviewer found this problem with your previous attempt: {feedback}\nFix it."
 
-    text, truncated = call_model(AGENT_PROMPTS[task.agent], user, 700)
-    return text, truncated, sorted({h["source"] for h in hits})
+    text, truncated = call_model(AGENT_PROMPTS[task.agent], user, 900)
+    return text, truncated, hits
 
 
-def review(plan, results) -> Review:
-    hits = sources_for(plan.goal, 6)
-    notes = "\n\n".join(f"[{h['source']}] {h['text']}" for h in hits) or "(no reference notes available)"
+def review(plan, results, chunks) -> Review:
+    if not chunks:
+        chunks = [(h["source"], h["text"]) for h in sources_for(plan.goal, 6)]
+    notes = "\n\n".join(f"[{s}] {t}" for s, t in chunks)[:7000] or "(no reference notes available)"
     body = "\n\n".join(
         f"[task_id={t.id}] {t.title}\n{results[t.id]}"
         for t in plan.tasks if t.agent != "reviewer"
@@ -115,31 +119,43 @@ def execute_plan(plan: Plan) -> dict:
     by_id = {t.id: t for t in plan.tasks}
     workers = [t for t in sorted(plan.tasks, key=lambda t: t.id) if t.agent != "reviewer"]
     results, log, reviews = {}, [], []
+    chunks, seen_chunks = [], set()
 
     def run_and_log(task, attempt, feedback=None):
         start = time.time()
-        text, truncated, sources = run_worker(task, plan, results, feedback)
+        text, truncated, hits = run_worker(task, plan, results, feedback)
         results[task.id] = text
+        for h in hits:
+            key = (h["source"], h["text"])
+            if key not in seen_chunks:
+                seen_chunks.add(key)
+                chunks.append(key)
         log.append({"task_id": task.id, "agent": task.agent, "title": task.title,
                     "attempt": attempt, "seconds": round(time.time() - start, 2),
-                    "truncated": truncated, "sources": sources, "output": text})
+                    "truncated": truncated,
+                    "sources": sorted({h["source"] for h in hits}),
+                    "output": text})
 
     for task in workers:
         run_and_log(task, 1)
 
     start = time.time()
-    first = review(plan, results)
+    first = review(plan, results, chunks)
     reviews.append({**first.model_dump(), "seconds": round(time.time() - start, 2)})
 
     if first.verdict == "FAIL":
-        retried = set()
+        retried, seen_problems = set(), set()
         for issue in first.issues:
+            key = issue.problem.strip().lower()
+            if key in seen_problems:
+                continue
+            seen_problems.add(key)
             task = by_id.get(issue.task_id)
             if task and task.agent != "reviewer" and task.id not in retried:
                 retried.add(task.id)
                 run_and_log(task, 2, issue.problem)
         start = time.time()
-        second = review(plan, results)
+        second = review(plan, results, chunks)
         reviews.append({**second.model_dump(), "seconds": round(time.time() - start, 2)})
 
     return {"log": log, "reviews": reviews,
